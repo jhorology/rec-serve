@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Service runtime & logs
+logs/
+.service.pid
+.service.host
+.service.backend_port
+
+# Local agent / editor session artifacts
+.agent-shell/
+.pytest_cache/
+.ruff_cache/
