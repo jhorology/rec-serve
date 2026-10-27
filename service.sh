@@ -408,8 +408,12 @@ cmd_install() {
   fi
   sudo=$(launchd_sudo "$mode")
 
-  if [[ ! -x "$SCRIPT_DIR/.venv/bin/rec-serve" ]]; then
-    echo "❌ .venv が未作成です。先に: mise install && mise exec -- uv sync" >&2
+  # 稼働中のサービスを止める前に依存関係を同期する。
+  # launchd は PATH が最小限で、対話シェルの設定も読まないため .venv を直接使う。
+  mise exec -- uv sync
+  local service_bin="$SCRIPT_DIR/.venv/bin/rec-serve"
+  if [[ ! -x "$service_bin" ]]; then
+    echo "❌ 実行ファイルがありません: $service_bin" >&2
     return 1
   fi
 
@@ -435,7 +439,7 @@ cmd_install() {
 #!/bin/bash
 set -euo pipefail
 cd "${SCRIPT_DIR}"
-exec "${SCRIPT_DIR}/.venv/bin/rec-serve" "\$@"
+exec "${service_bin}" "\$@"
 EOF
   chmod +x "$LAUNCHER_BIN"
 
@@ -455,8 +459,14 @@ EOF
   launchd_bootout "$mode" "$plist"
   launchd_bootstrap "$mode" "$plist"
   echo "$BIND_HOST" >"$HOST_FILE"
-  wait_for_health || true
+  local health_status=0
+  wait_for_health || health_status=$?
+  if ((health_status)); then
+    echo "❌ 自動起動は登録済みですが起動確認に失敗しました。ログ: $LOG_FILE" >&2
+    tail -n 15 "$LOG_FILE" >&2
+  fi
   cmd_status
+  return "$health_status"
 }
 
 cmd_uninstall() {
@@ -482,13 +492,15 @@ rec-serve — Recursive rec (Flint) 常駐サービス (外部公開プロキシ
 
 使用法: ./service.sh <command> [options]   (引数なし → status)
 
-  start [--public | --tailscale]   バックグラウンド起動 (launchd なし)
+  start [--public | --tailscale | --localhost] [--no-keepalive]
+                       バックグラウンド起動 (launchd なし)
   stop                 停止
-  restart [--public | --tailscale]   停止 → 起動 (launchd 登録済なら再 load)
+  restart [--public | --tailscale | --localhost] [--no-keepalive]
+                       停止 → 起動 (launchd 登録済なら再 load)
   status               稼働状態 / keepalive / launchd
   log [-f]             ログ表示 (-f でフォロー)
 
-  install [--daemon | --agent] [--public | --tailscale]
+  install [--daemon | --agent] [--public | --tailscale | --localhost] [--no-keepalive]
                        自動常駐を登録 (KeepAlive)
                        --agent  (既定) ~/Library/LaunchAgents/${PLIST_LABEL}.plist
                        --daemon        /Library/LaunchDaemons/${PLIST_LABEL}.plist (要 sudo)

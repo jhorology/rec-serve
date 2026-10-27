@@ -33,7 +33,9 @@ mise exec -- uv sync
 ./service.sh status
 ```
 
-`install` は既存サービスを停止してから登録・起動します。以後は自動起動し、
+`install` は依存関係を同期 (`uv sync`) してから既存サービスを停止し、登録・起動します。
+launchd からは `.venv/bin/rec-serve` の絶対パスで起動するため、ログイン時の PATH や mise に依存しません。
+リポジトリや `.venv` の配置を変更した場合は再度 `install` してください。以後は自動起動し、
 `./service.sh restart` でもバインド先・方式 (agent / daemon)・スリープ抑制の設定を継承します。
 片方の方式で install すると、もう片方の登録は自動で解除されます。
 
@@ -97,6 +99,22 @@ curl --noproxy '*' -fsS "$REC_SERVE_URL/v1/chat/completions" \
   -d '{"model":"flint","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+### ブラウザからのアクセス (Page Assist)
+
+rec 本体は `Origin` を検査せず、API キーはプロキシが付与するため、そのままでは
+ブラウザで開いた任意の Web ページから API を呼べてしまいます (CSRF)。
+そこでプロキシは `Origin` ヘッダー付きのリクエストを **403 で拒否** します。
+
+例外として Chrome の公式 Page Assist 拡張
+(`chrome-extension://jfgfiigpkhlkbnfnbobbkinehhfdhndo`) のみ CORS を許可します。
+Base URL `http://<サーバーの Tailscale IPv4>:11501/v1`、API キーは任意の文字列、
+モデル `flint` を設定してください。開発版など拡張 ID が異なるものは許可しません。
+
+この Origin 制限はブラウザ経由のアクセスを防ぐためのもので、認証ではありません。
+curl など Origin を付けないクライアントは引き続き利用できます。
+
+### エンドポイント
+
 | エンドポイント | 内容 |
 | :--- | :--- |
 | `GET /health` | プロキシ + rec (`upstream`: `status` / `busy` / `queued`) + keepalive |
@@ -143,6 +161,8 @@ lsof -nP -iTCP:11500 -sTCP:LISTEN   # rec 本体
 | 状況 | 確認・対処 |
 | :--- | :--- |
 | `127.0.0.1:11500 は既に使用中` でクラッシュループ | 手動の `rec serve` / `rec launch` が動いている。`rec stop` で停止 |
+| `... で待ち受けできません` | 公開ポートが使用中、またはブート直後で Tailscale IP がまだない (launchd が 30 秒ごとに再試行) |
+| ブラウザ拡張から 403 | 公式 Page Assist 以外の Origin は拒否される仕様 |
 | 起動待機がタイムアウト | 初回はモデル読み込みに時間がかかる。`./service.sh log -f` で `flint is ready` を確認 |
 | `--tailscale` で IP を取得できない | `tailscale` が PATH にあるか、Tailscale に接続済みか確認 |
 | 別の端末から接続できない | 接続元の Tailscale 接続・ACL と、サーバーの `status` を確認 |

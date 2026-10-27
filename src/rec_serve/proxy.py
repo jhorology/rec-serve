@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from rich.console import Console
 from rich.text import Text
@@ -31,6 +32,7 @@ console = Console(soft_wrap=True)
 
 DEFAULT_PUBLIC_PORT = 11501
 DEFAULT_BACKEND_PORT = 11500
+PAGE_ASSIST_ORIGIN = "chrome-extension://jfgfiigpkhlkbnfnbobbkinehhfdhndo"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 HOP_BY_HOP = {
     "connection",
@@ -50,6 +52,17 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.5)
         return sock.connect_ex((host, port)) == 0
+
+
+def check_bindable(host: str, port: int) -> None:
+    """公開ポートが bind できるか、rec を読み込む前に確認する。"""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError as e:
+            raise RuntimeError(f"{host}:{port} で待ち受けできません: {e}") from e
 
 
 def read_api_key(rec_bin: str) -> str:
@@ -140,6 +153,26 @@ def create_app(
     app.state.rec_process = rec_process
 
     @app.middleware("http")
+    async def check_browser_origin(request: Request, call_next):
+        # rec は Origin を検査せず、キーはプロキシが付与するため、ブラウザ経由の
+        # クロスサイトリクエストはここで拒否する (CSRF 対策)。
+        origin = request.headers.get("origin")
+        if origin is not None and origin != PAGE_ASSIST_ORIGIN:
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Cross-site requests are not allowed."},
+            )
+        return await call_next(request)
+
+    # Only the official Page Assist Chrome extension can use browser cross-origin access.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[PAGE_ASSIST_ORIGIN],
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
     async def keepalive_middleware(request: Request, call_next):
         # ヘルスチェック以外のリクエストで keepalive (スリープ抑制) を更新
         if request.url.path not in ("/", "/health"):
@@ -203,6 +236,8 @@ def create_app(
         async def stream():
             try:
                 async for chunk in upstream.aiter_raw():
+                    # 1 時間を超える長いストリーム中もスリープ抑制を維持する
+                    keepalive.touch()
                     yield chunk
             finally:
                 await upstream.aclose()
@@ -271,6 +306,7 @@ def run_server(
             f"127.0.0.1:{backend_port} は既に使用中です。`rec stop` で停止してください"
         )
 
+    check_bindable(host, port)
     api_key = read_api_key(rec_bin)
     rec_proc = start_rec_process(port=backend_port, rec_bin=rec_bin, context=context)
     backend_base = f"http://{backend_host}:{backend_port}"
@@ -319,9 +355,11 @@ def run_server(
     signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         asyncio.run(_ready())
-    except BaseException:
+    except BaseException as exc:
         _stop_rec_process(rec_proc)
-        raise RuntimeError(f"rec serve failed to become healthy on {backend_base}") from None
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
+        raise RuntimeError(f"rec serve failed to become healthy on {backend_base}") from exc
 
     console.print(
         f"[green]✓ rec serve ready[/green]  backend={backend_base}  "
